@@ -5,11 +5,21 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/deepersensor/documcp/api"
 	"github.com/deepersensor/documcp/config"
+	"github.com/deepersensor/documcp/docstore"
+	"github.com/deepersensor/documcp/index"
+	"github.com/deepersensor/documcp/internal"
 	"github.com/deepersensor/documcp/scheduler"
 )
 
 const version = "0.1.0"
+
+// Global in-memory stores for API and CLI
+var (
+	globalDocStore = make(map[string]*docstore.Document)
+	globalIndex    = index.NewInvertedIndex()
+)
 
 func main() {
 	// Load config at startup
@@ -50,18 +60,63 @@ func main() {
 		}
 		fmt.Printf("Crawling: %s (depth=%d, max=%d, concurrency=%d)\n", *url, *depth, *maxPages, *concurrency)
 		fmt.Printf("Process ID: %s\nProcess Dir: %s\n", job.ProcessID, job.ProcessDir)
+		// Indexing and docstore population
 		for _, res := range results {
-			fmt.Printf("URL: %s\n", res.URL)
-			fmt.Printf("Text: %.100s\n", res.Text)
+			// Parse sentences, code, headings
+			sentences := internal.SplitTextToSentences(res.Text)
+			// For code/headings, parse HTML again (not optimal, but works for now)
+			doc, _ := internal.ParseHTMLFromURL(res.URL)
+			var codeSnippets, headings []string
+			if doc != nil {
+				codeSnippets = internal.ExtractCodeSnippets(doc)
+				headings = internal.ExtractHeadings(doc)
+			}
+			docID := globalIndex.AddDocument(res.URL, "", res.Text)
+			d := docstore.NewDocument(docID, res.URL, "", res.Text, headings, codeSnippets, nil, 1)
+			globalDocStore[docID] = d
+			// Optionally, index sentences and code snippets as well
+			for _, s := range sentences {
+				globalIndex.AddDocument(res.URL, "", s)
+			}
+			for _, code := range codeSnippets {
+				globalIndex.AddDocument(res.URL, "", code)
+			}
+		}
+		fmt.Printf("Indexed %d documents.\n", len(results))
+		fmt.Printf("Results saved to: %s\n", job.ProcessDir)
+	case "query":
+		queryCmd := flag.NewFlagSet("query", flag.ExitOnError)
+		queryStr := queryCmd.String("s", "", "Query string")
+		queryCmd.Parse(os.Args[2:])
+		if *queryStr == "" {
+			fmt.Println("Please provide a query string with -s")
+			os.Exit(1)
+		}
+		results := globalIndex.Search(*queryStr)
+		fmt.Printf("Found %d results for query: %q\n", len(results), *queryStr)
+		for _, doc := range results {
+			d := globalDocStore[doc.ID]
+			fmt.Printf("URL: %s\n", d.URL)
+			fmt.Printf("Text: %.200s\n", d.Text)
+			if len(d.Headings) > 0 {
+				fmt.Printf("Headings: %v\n", d.Headings)
+			}
+			if len(d.CodeSnippets) > 0 {
+				fmt.Printf("Code Snippets: %v\n", d.CodeSnippets)
+			}
 			fmt.Println("-----")
 		}
-		fmt.Printf("Results saved to: %s\n", job.ProcessDir)
 	case "serve":
 		serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
 		port := serveCmd.String("port", "8080", "Port to run API server on")
 		serveCmd.Parse(os.Args[2:])
-		fmt.Printf("Starting API server on port %s (stub)\n", *port)
-		// TODO: Call API server module
+		fmt.Printf("Starting API server on port %s\n", *port)
+		// Pass references to globalDocStore and globalIndex to the API
+		api.SetGlobalStores(globalDocStore, globalIndex)
+		if err := api.StartServer(":" + *port); err != nil {
+			fmt.Fprintf(os.Stderr, "API server failed: %v\n", err)
+			os.Exit(1)
+		}
 	case "config":
 		configCmd := flag.NewFlagSet("config", flag.ExitOnError)
 		dir := configCmd.String("dir", "", "Config directory to use")
@@ -96,8 +151,9 @@ func main() {
 func printUsage() {
 	fmt.Println("Usage: documcp <command> [options]")
 	fmt.Println("Commands:")
-	fmt.Println("  crawl   -url <seed_url>    Crawl a documentation site (stub)")
-	fmt.Println("  serve   [-port <port>]     Start the API server (stub)")
+	fmt.Println("  crawl   -url <seed_url>    Crawl a documentation site")
+	fmt.Println("  query   -s <string>        Query indexed content")
+	fmt.Println("  serve   [-port <port>]     Start the API server")
 	fmt.Println("  config  [-dir <dir>]       Show config from specified directory")
 	fmt.Println("  version                     Show version")
 }

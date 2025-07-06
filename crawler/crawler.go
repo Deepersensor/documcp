@@ -18,10 +18,16 @@ type CrawlResult struct {
 	Text string
 }
 
+// queueItem holds a URL and its crawl depth.
+type queueItem struct {
+	url   string
+	depth int
+}
+
 // Crawler is the main struct for managing crawl state.
 type Crawler struct {
 	Visited    map[string]struct{}
-	Queue      chan string
+	Queue      chan queueItem
 	Results    chan CrawlResult
 	Host       string
 	mu         sync.Mutex
@@ -38,7 +44,7 @@ func NewCrawler(seed, processDir string) (*Crawler, error) {
 	}
 	c := &Crawler{
 		Visited:    make(map[string]struct{}),
-		Queue:      make(chan string, 100),
+		Queue:      make(chan queueItem, 100),
 		Results:    make(chan CrawlResult, 100),
 		Host:       u.Host,
 		ProcessDir: processDir,
@@ -49,9 +55,11 @@ func NewCrawler(seed, processDir string) (*Crawler, error) {
 
 // Start begins crawling and persists results to processDir/results.json.
 func (c *Crawler) Start(seed string, maxDepth, maxPages, concurrency int) ([]CrawlResult, error) {
+	// Start the crawl with the seed URL
 	c.wg.Add(1)
-	go c.enqueue(seed)
+	go c.enqueue(seed, 0)
 
+	// Start worker goroutines
 	for i := 0; i < concurrency; i++ {
 		go c.worker(maxDepth, maxPages)
 	}
@@ -68,10 +76,13 @@ func (c *Crawler) Start(seed string, maxDepth, maxPages, concurrency int) ([]Cra
 		close(done)
 	}()
 
+	// Wait for all URLs to be processed
 	c.wg.Wait()
 	close(c.Queue)
-	close(c.Results)
+	// Wait for results to be collected or for maxPages to be reached
 	<-done
+	// After results are collected, close Results channel to terminate any consumers
+	close(c.Results)
 
 	// Persist results to disk
 	if err := c.saveResults(results); err != nil {
@@ -80,59 +91,66 @@ func (c *Crawler) Start(seed string, maxDepth, maxPages, concurrency int) ([]Cra
 	return results, nil
 }
 
-func (c *Crawler) enqueue(u string) {
+func (c *Crawler) worker(maxDepth, maxPages int) {
+	for item := range c.Queue {
+		c.crawl(item.url, item.depth, maxDepth, maxPages)
+	}
+}
+
+func (c *Crawler) enqueue(u string, depth int) {
 	defer c.wg.Done()
 	c.mu.Lock()
+	// If already visited or over maxPages, skip
 	if _, ok := c.Visited[u]; ok {
 		c.mu.Unlock()
 		return
 	}
 	c.Visited[u] = struct{}{}
 	c.mu.Unlock()
-	c.Queue <- u
-}
-
-func (c *Crawler) worker(maxDepth, maxPages int) {
-	for u := range c.Queue {
-		c.crawl(u, 0, maxDepth, maxPages)
-	}
+	// Add to queue for processing
+	c.Queue <- queueItem{url: u, depth: depth}
 }
 
 func (c *Crawler) crawl(u string, depth, maxDepth, maxPages int) {
-	if depth > maxDepth || len(c.Visited) > maxPages {
+	if depth > maxDepth {
 		return
 	}
-	// Debug: Print crawling URL and depth
-	fmt.Printf("[CRAWL] Depth %d: %s\n", depth, u)
+	c.mu.Lock()
+	if len(c.Visited) > maxPages {
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
 
+	fmt.Printf("[CRAWL] Depth %d: %s\n", depth, u)
 	resp, err := http.Get(u)
 	if err != nil {
+		fmt.Printf("[ERROR] Failed to GET %s: %v\n", u, err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("[ERROR] Non-OK status for %s: %d\n", u, resp.StatusCode)
 		return
 	}
 	doc, err := html.Parse(resp.Body)
 	if err != nil {
+		fmt.Printf("[ERROR] Failed to parse HTML for %s: %v\n", u, err)
 		return
 	}
 	text := extractText(doc)
 	c.Results <- CrawlResult{URL: u, Text: text}
 
 	links := extractLinks(doc, c.Host)
+	fmt.Printf("[LINKS] Found %d links on %s\n", len(links), u)
 	for _, link := range links {
 		c.mu.Lock()
 		if _, ok := c.Visited[link]; !ok && len(c.Visited) < maxPages {
 			c.Visited[link] = struct{}{}
 			c.mu.Unlock()
-			// Debug: Print enqueued link
-			fmt.Printf("[ENQUEUE] %s\n", link)
+			fmt.Printf("[ENQUEUE] %s (depth %d)\n", link, depth+1)
 			c.wg.Add(1)
-			go func(l string, d int) {
-				defer c.wg.Done()
-				c.Queue <- l
-			}(link, depth+1)
+			go c.enqueue(link, depth+1)
 		} else {
 			c.mu.Unlock()
 		}
