@@ -2,6 +2,7 @@ package crawler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -101,6 +102,9 @@ func (c *Crawler) crawl(u string, depth, maxDepth, maxPages int) {
 	if depth > maxDepth || len(c.Visited) > maxPages {
 		return
 	}
+	// Debug: Print crawling URL and depth
+	fmt.Printf("[CRAWL] Depth %d: %s\n", depth, u)
+
 	resp, err := http.Get(u)
 	if err != nil {
 		return
@@ -122,6 +126,8 @@ func (c *Crawler) crawl(u string, depth, maxDepth, maxPages int) {
 		if _, ok := c.Visited[link]; !ok && len(c.Visited) < maxPages {
 			c.Visited[link] = struct{}{}
 			c.mu.Unlock()
+			// Debug: Print enqueued link
+			fmt.Printf("[ENQUEUE] %s\n", link)
 			c.wg.Add(1)
 			go func(l string, d int) {
 				defer c.wg.Done()
