@@ -1,7 +1,6 @@
 package crawler
 
 import (
-	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -63,7 +62,8 @@ func (c *Crawler) Start(seed string, maxDepth, maxPages, concurrency int) []Craw
 	}()
 
 	c.wg.Wait()
-	close(c.Queue)
+	close(c.Queue)   // Only close after all enqueue/crawl goroutines are done
+	close(c.Results) // Close results so the collector goroutine can finish
 	<-done
 	return results
 }
@@ -114,6 +114,7 @@ func (c *Crawler) crawl(u string, depth, maxDepth, maxPages int) {
 			c.wg.Add(1)
 			go func(l string, d int) {
 				defer c.wg.Done()
+				// Only send to Queue if it's not closed
 				c.Queue <- l
 			}(link, depth+1)
 		} else {

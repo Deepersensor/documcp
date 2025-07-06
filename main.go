@@ -5,12 +5,27 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/deepersensor/documcp/config"
 	"github.com/deepersensor/documcp/crawler"
 )
 
 const version = "0.1.0"
 
 func main() {
+	// Load config at startup
+	configDir, err := config.GetDefaultConfigDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to get config dir: %v\n", err)
+		os.Exit(1)
+	}
+	cfg, err := config.LoadConfig(configDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+	// Optionally print config info for confirmation
+	// fmt.Printf("Loaded config: AppName=%s, Version=%s\n", cfg.AppName, cfg.Version)
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
