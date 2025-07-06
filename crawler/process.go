@@ -16,4 +16,3 @@ func NewProcessDir(baseDir string) (string, error) {
 	}
 	return processDir, nil
 }
-}
