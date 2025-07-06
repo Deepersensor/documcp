@@ -1,9 +1,11 @@
 package crawler
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/url"
-	"strings"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"golang.org/x/net/html"
@@ -17,31 +19,35 @@ type CrawlResult struct {
 
 // Crawler is the main struct for managing crawl state.
 type Crawler struct {
-	Visited map[string]struct{}
-	Queue   chan string
-	Results chan CrawlResult
-	Host    string
-	mu      sync.Mutex
-	wg      sync.WaitGroup
+	Visited    map[string]struct{}
+	Queue      chan string
+	Results    chan CrawlResult
+	Host       string
+	mu         sync.Mutex
+	wg         sync.WaitGroup
+	ProcessDir string // Directory for this crawl process
+	ProcessID  string // Unique process ID
 }
 
-// NewCrawler creates a new Crawler for the given seed URL.
-func NewCrawler(seed string) (*Crawler, error) {
+// NewCrawler creates a new Crawler for the given seed URL and process directory.
+func NewCrawler(seed, processDir string) (*Crawler, error) {
 	u, err := url.Parse(seed)
 	if err != nil {
 		return nil, err
 	}
 	c := &Crawler{
-		Visited: make(map[string]struct{}),
-		Queue:   make(chan string, 100),
-		Results: make(chan CrawlResult, 100),
-		Host:    u.Host,
+		Visited:    make(map[string]struct{}),
+		Queue:      make(chan string, 100),
+		Results:    make(chan CrawlResult, 100),
+		Host:       u.Host,
+		ProcessDir: processDir,
+		ProcessID:  filepath.Base(processDir),
 	}
 	return c, nil
 }
 
-// Start begins crawling from the seed URL, up to maxDepth and maxPages.
-func (c *Crawler) Start(seed string, maxDepth, maxPages, concurrency int) []CrawlResult {
+// Start begins crawling and persists results to processDir/results.json.
+func (c *Crawler) Start(seed string, maxDepth, maxPages, concurrency int) ([]CrawlResult, error) {
 	c.wg.Add(1)
 	go c.enqueue(seed)
 
@@ -62,10 +68,15 @@ func (c *Crawler) Start(seed string, maxDepth, maxPages, concurrency int) []Craw
 	}()
 
 	c.wg.Wait()
-	close(c.Queue)   // Only close after all enqueue/crawl goroutines are done
-	close(c.Results) // Close results so the collector goroutine can finish
+	close(c.Queue)
+	close(c.Results)
 	<-done
-	return results
+
+	// Persist results to disk
+	if err := c.saveResults(results); err != nil {
+		return results, err
+	}
+	return results, nil
 }
 
 func (c *Crawler) enqueue(u string) {
@@ -114,13 +125,27 @@ func (c *Crawler) crawl(u string, depth, maxDepth, maxPages int) {
 			c.wg.Add(1)
 			go func(l string, d int) {
 				defer c.wg.Done()
-				// Only send to Queue if it's not closed
 				c.Queue <- l
 			}(link, depth+1)
 		} else {
 			c.mu.Unlock()
 		}
 	}
+}
+
+// saveResults persists crawl results to processDir/results.json.
+func (c *Crawler) saveResults(results []CrawlResult) error {
+	if err := os.MkdirAll(c.ProcessDir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(filepath.Join(c.ProcessDir, "results.json"))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	return enc.Encode(results)
 }
 
 // extractLinks finds all internal links in the HTML document.
@@ -160,4 +185,5 @@ func extractText(n *html.Node) string {
 		sb.WriteString(extractText(c))
 	}
 	return sb.String()
+}
 }
